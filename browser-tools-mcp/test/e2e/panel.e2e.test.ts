@@ -46,6 +46,7 @@ const STUB_SETTINGS = {
   captureNetwork: true,
   captureResponseBodies: false,
   captureMode: "debugger",
+  allowPageControl: false,
 };
 
 /** Installed before any page script runs, so panel.js never sees it missing. */
@@ -231,6 +232,7 @@ describe.skipIf(!browserSupport.usable)("panel UI in the real extension origin",
     // A partial payload would silently reset whatever it omitted.
     expect(Object.keys(last[1]).sort()).toEqual(
       [
+        "allowPageControl",
         "captureConsole",
         "captureMode",
         "captureNetwork",

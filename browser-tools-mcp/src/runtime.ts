@@ -72,6 +72,12 @@ class UnavailableConnectorClient implements ConnectorClient {
   storage(): Promise<never> {
     return this.#fail();
   }
+  runPageScript(): Promise<never> {
+    return this.#fail();
+  }
+  interactWithPage(): Promise<never> {
+    return this.#fail();
+  }
   audit(): Promise<never> {
     return this.#fail();
   }

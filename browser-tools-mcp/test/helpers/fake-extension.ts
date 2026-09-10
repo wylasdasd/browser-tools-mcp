@@ -14,6 +14,8 @@ export interface FakeExtensionOptions {
   onScreenshot?: (msg: any) => Promise<unknown> | unknown;
   onRefresh?: (msg: any) => Promise<unknown> | unknown;
   onStorage?: (msg: any) => Promise<unknown> | unknown;
+  onScript?: (msg: any) => Promise<unknown> | unknown;
+  onInteract?: (msg: any) => Promise<unknown> | unknown;
 }
 
 /**
@@ -91,6 +93,20 @@ export class FakeExtension {
           ? await custom(msg)
           : { ok: true, storage: { localStorage: {}, sessionStorage: {}, cookies: [] } };
         this.send({ type: "storage-result", requestId: msg.requestId, ...(payload as object) });
+        break;
+      }
+      case "run-script": {
+        const custom = this.#options.onScript;
+        const payload = custom
+          ? await custom(msg)
+          : { ok: true, result: null, resultType: "object", awaited: true };
+        this.send({ type: "run-script-result", requestId: msg.requestId, ...(payload as object) });
+        break;
+      }
+      case "interact": {
+        const custom = this.#options.onInteract;
+        const payload = custom ? await custom(msg) : { ok: true, matched: 1, x: 10, y: 10 };
+        this.send({ type: "interact-result", requestId: msg.requestId, ...(payload as object) });
         break;
       }
       default:

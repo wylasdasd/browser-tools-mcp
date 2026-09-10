@@ -304,6 +304,82 @@ describe("browser control", () => {
     expect(res.status).toBe(200);
     expect(res.body.storage.localStorage.theme).toBe("dark");
   });
+
+  it("evaluates a page script through the extension", async () => {
+    extension = await connectExtension({
+      onScript: (msg) => ({
+        ok: true,
+        result: { title: "ok", script: msg.script },
+        resultType: "object",
+        awaited: true,
+      }),
+    });
+
+    const res = await request(connector.app)
+      .post("/api/script")
+      .set("Authorization", auth())
+      .send({ script: "return document.title" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.title).toBe("ok");
+    expect(res.body.truncated).toBe(false);
+    expect(extension.received.some((m) => m.type === "run-script" && m.script === "return document.title")).toBe(
+      true
+    );
+  });
+
+  it("redacts secrets in a script result", async () => {
+    extension = await connectExtension({
+      onScript: () => ({
+        ok: true,
+        result: { token: "sk-ant-abcdefghijklmnopqrstuvwxyz1234" },
+        resultType: "object",
+        awaited: true,
+      }),
+    });
+
+    const res = await request(connector.app)
+      .post("/api/script")
+      .set("Authorization", auth())
+      .send({ script: "return { token: window.secret }" });
+
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(res.body.result)).toContain("[REDACTED]");
+    expect(JSON.stringify(res.body.result)).not.toContain("sk-ant-");
+  });
+
+  it("rejects an empty script without talking to the extension", async () => {
+    extension = await connectExtension();
+    const res = await request(connector.app).post("/api/script").set("Authorization", auth()).send({ script: "  " });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/required/i);
+    expect(extension.received.some((m) => m.type === "run-script")).toBe(false);
+  });
+
+  it("forwards an interact request to the matching tab", async () => {
+    extension = await connectExtension({
+      onInteract: () => ({ ok: true, matched: 2, x: 12, y: 34, tagName: "A" }),
+    });
+
+    const res = await request(connector.app)
+      .post("/api/interact")
+      .set("Authorization", auth())
+      .send({ action: "click", selector: "a.nav" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ action: "click", matched: 2, tagName: "A" });
+    expect(extension.received.some((m) => m.type === "interact" && m.selector === "a.nav")).toBe(true);
+  });
+
+  it("rejects an unknown interact action", async () => {
+    extension = await connectExtension();
+    const res = await request(connector.app)
+      .post("/api/interact")
+      .set("Authorization", auth())
+      .send({ action: "drag" });
+    expect(res.status).toBe(400);
+    expect(extension.received.some((m) => m.type === "interact")).toBe(false);
+  });
 });
 
 describe("connection health", () => {

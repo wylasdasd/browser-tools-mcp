@@ -172,6 +172,23 @@ describe("HttpConnectorClient against a live connector", () => {
     expect((await client.console({})).total).toBe(0);
   });
 
+  it("runs a page script and an interaction over HTTP", async () => {
+    const ext = await connectExtension({
+      onScript: () => ({ ok: true, result: 42, resultType: "number", awaited: true }),
+      onInteract: () => ({ ok: true, matched: 1, x: 5, y: 6, tagName: "BUTTON" }),
+    });
+    const client = makeClient();
+
+    expect(await client.runPageScript("return 42")).toMatchObject({ result: 42, resultType: "number" });
+    expect(ext.received.some((m) => m.type === "run-script")).toBe(true);
+
+    expect(await client.interactWithPage({ action: "click", selector: "button" })).toMatchObject({
+      action: "click",
+      tagName: "BUTTON",
+    });
+    expect(ext.received.some((m) => m.type === "interact")).toBe(true);
+  });
+
   it("runs an audit over HTTP", async () => {
     const client = makeClient();
     const report = await client.audit("seo", { url: "https://example.com" });

@@ -13,6 +13,7 @@ import {
 } from "./resources.js";
 import { createLogger } from "../util/logger.js";
 import { AUDIT_CATEGORIES, type AuditCategory } from "../lighthouse/types.js";
+import { INTERACT_ACTIONS } from "../connector/connector.js";
 
 const log = createLogger("mcp");
 
@@ -723,6 +724,132 @@ const TOOLS: ToolDefinition[] = [
     "Run a best-practices audit",
     "Lighthouse best-practices audit of the current page: security, deprecated APIs and modern-web hygiene. Takes up to a minute and launches a separate headless browser."
   ),
+  {
+    name: "runPageScript",
+    register(server, client) {
+      server.registerTool(
+        "runPageScript",
+        {
+          title: "Run JavaScript in the page",
+          description:
+            "Evaluates an async function body in the inspected page and returns a JSON-serialisable result. " +
+            "Use this to read page state. For clicks and typing, call interactWithPage instead — a synthetic " +
+            "element.click() is not a real user gesture. Disabled until the user enables page control in the " +
+            "BrowserTools panel. Return a value; do not return DOM nodes (they become a tag/id preview).",
+          inputSchema: {
+            script: z
+              .string()
+              .describe(
+                "Async function body, evaluated in the page. Example: const n = document.querySelectorAll('a').length; return { n };"
+              ),
+            timeoutMs: z
+              .number()
+              .int()
+              .min(1000)
+              .max(60_000)
+              .optional()
+              .describe("How long to wait for the script, in milliseconds. Defaults to 10000."),
+            tabId: tabIdInput,
+          },
+          outputSchema: {
+            result: z.unknown(),
+            resultType: z.string(),
+            awaited: z.boolean(),
+            truncated: z.boolean(),
+            tabId: z.union([z.number(), z.string()]).nullable(),
+            url: z.string(),
+            otherTabs: z.number().int(),
+          },
+          annotations: {
+            title: "Run JavaScript in the page",
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: true,
+          },
+        },
+        async ({ script, timeoutMs, tabId }) => {
+          try {
+            const result = await client.runPageScript(script, {
+              ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+              ...(tabId !== undefined ? { tabId } : {}),
+            });
+            return ok(result as unknown as Record<string, unknown>);
+          } catch (error) {
+            return fail(error);
+          }
+        }
+      );
+    },
+  },
+  {
+    name: "interactWithPage",
+    register(server, client) {
+      server.registerTool(
+        "interactWithPage",
+        {
+          title: "Click, type or press keys",
+          description:
+            "Synthesizes real mouse and keyboard input in the inspected page via the DevTools protocol. " +
+            "Use this for clicking, typing, hovering and scrolling — not runPageScript. Requires the " +
+            "debugger capture mode and page control enabled in the BrowserTools panel. Locate the target " +
+            "with a CSS selector, or omit selector to use the element selected in the Elements panel.",
+          inputSchema: {
+            action: z.enum(INTERACT_ACTIONS).describe("click, type, press, hover, or scroll"),
+            selector: z
+              .string()
+              .optional()
+              .describe("CSS selector for the target. Omit to use the Elements-panel selection ($0)."),
+            text: z.string().optional().describe("Text to insert. Required for type."),
+            key: z
+              .string()
+              .optional()
+              .describe("Key to press, e.g. Enter, Tab, Escape, ArrowDown. Required for press."),
+            x: z.number().optional().describe("Viewport X, used when clicking a point instead of a selector."),
+            y: z.number().optional().describe("Viewport Y, used when clicking a point instead of a selector."),
+            deltaX: z.number().optional().describe("Horizontal wheel delta for scroll."),
+            deltaY: z.number().optional().describe("Vertical wheel delta for scroll."),
+            tabId: tabIdInput,
+          },
+          outputSchema: {
+            action: z.string(),
+            matched: z.number().int(),
+            x: z.number().optional(),
+            y: z.number().optional(),
+            tagName: z.string().optional(),
+            tabId: z.union([z.number(), z.string()]).nullable(),
+            url: z.string(),
+            otherTabs: z.number().int(),
+          },
+          annotations: {
+            title: "Click, type or press keys",
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: true,
+          },
+        },
+        async ({ action, selector, text, key, x, y, deltaX, deltaY, tabId }) => {
+          try {
+            const result = await client.interactWithPage({
+              action,
+              ...(selector !== undefined ? { selector } : {}),
+              ...(text !== undefined ? { text } : {}),
+              ...(key !== undefined ? { key } : {}),
+              ...(x !== undefined ? { x } : {}),
+              ...(y !== undefined ? { y } : {}),
+              ...(deltaX !== undefined ? { deltaX } : {}),
+              ...(deltaY !== undefined ? { deltaY } : {}),
+              ...(tabId !== undefined ? { tabId } : {}),
+            });
+            return ok(result as unknown as Record<string, unknown>);
+          } catch (error) {
+            return fail(error);
+          }
+        }
+      );
+    },
+  },
 ];
 
 export const ALL_TOOL_NAMES = TOOLS.map((tool) => tool.name);

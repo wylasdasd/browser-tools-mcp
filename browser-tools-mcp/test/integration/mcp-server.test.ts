@@ -71,9 +71,11 @@ describe("tool registration", () => {
         "getPageInfo",
         "getSelectedElement",
         "listBrowserTabs",
+        "interactWithPage",
         "refreshBrowser",
         "runAccessibilityAudit",
         "runBestPracticesAudit",
+        "runPageScript",
         "runPerformanceAudit",
         "runSEOAudit",
         "takeScreenshot",
@@ -114,6 +116,10 @@ describe("tool registration", () => {
     expect(byName.get("wipeLogs")?.annotations?.readOnlyHint).toBe(false);
     expect(byName.get("wipeLogs")?.annotations?.destructiveHint).toBe(true);
     expect(byName.get("refreshBrowser")?.annotations?.readOnlyHint).toBe(false);
+    expect(byName.get("runPageScript")?.annotations?.readOnlyHint).toBe(false);
+    expect(byName.get("runPageScript")?.annotations?.destructiveHint).toBe(true);
+    expect(byName.get("interactWithPage")?.annotations?.readOnlyHint).toBe(false);
+    expect(byName.get("interactWithPage")?.annotations?.destructiveHint).toBe(true);
     // A screenshot writes a file but destroys nothing.
     expect(byName.get("takeScreenshot")?.annotations?.destructiveHint).toBe(false);
   });
@@ -299,6 +305,59 @@ describe("browser control and storage", () => {
     });
 
     expect(JSON.stringify(result)).toContain("dark");
+  });
+
+  it("runs a page script through the extension", async () => {
+    const ext = await connectExtension({
+      onScript: (msg) => ({
+        ok: true,
+        result: { href: "https://app.local/", echoed: msg.script },
+        resultType: "object",
+        awaited: true,
+      }),
+    });
+
+    const result: any = await client.callTool({
+      name: "runPageScript",
+      arguments: { script: "return location.href" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent.result.href).toBe("https://app.local/");
+    expect(ext.received.some((m) => m.type === "run-script")).toBe(true);
+  });
+
+  it("synthesizes a click through the extension", async () => {
+    const ext = await connectExtension({
+      onInteract: () => ({ ok: true, matched: 1, x: 40, y: 80, tagName: "BUTTON" }),
+    });
+
+    const result: any = await client.callTool({
+      name: "interactWithPage",
+      arguments: { action: "click", selector: "button.submit" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent.tagName).toBe("BUTTON");
+    const request = [...ext.received].reverse().find((m) => m.type === "interact");
+    expect(request).toMatchObject({ action: "click", selector: "button.submit" });
+  });
+
+  it("surfaces an extension refusal instead of succeeding", async () => {
+    await connectExtension({
+      onScript: () => ({
+        ok: false,
+        error: 'Page control is disabled. Enable "Allow page scripts and input" in the BrowserTools panel.',
+      }),
+    });
+
+    const result: any = await client.callTool({
+      name: "runPageScript",
+      arguments: { script: "return 1" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/Page control is disabled/);
   });
 });
 

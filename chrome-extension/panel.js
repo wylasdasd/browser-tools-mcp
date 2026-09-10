@@ -15,6 +15,7 @@
     "captureResponseBodies",
     "showRequestHeaders",
     "showResponseHeaders",
+    "allowPageControl",
   ];
   const NUMBERS = ["logLimit", "queryLimit", "stringSizeLimit"];
 

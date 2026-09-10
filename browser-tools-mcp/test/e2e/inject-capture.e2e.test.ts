@@ -27,6 +27,7 @@ if (!browserSupport.usable) console.warn(`\n  SKIPPED: ${browserSupport.reason}\
 
 let INJECT_BOOTSTRAP: string;
 let INJECT_DRAIN: string;
+let PAGE_VALUE_SERIALIZE: string;
 let browser: Browser;
 let fixture: FixtureServer;
 
@@ -35,12 +36,17 @@ beforeAll(async () => {
   // shared.js is a plain script of globals; evaluate it and take the two
   // injection strings back out.
   const extract = new Function(
-    `${source}\nreturn { INJECT_BOOTSTRAP, INJECT_DRAIN };`
-  ) as () => { INJECT_BOOTSTRAP: string; INJECT_DRAIN: string };
-  ({ INJECT_BOOTSTRAP, INJECT_DRAIN } = extract());
+    `${source}\nreturn { INJECT_BOOTSTRAP, INJECT_DRAIN, PAGE_VALUE_SERIALIZE };`
+  ) as () => {
+    INJECT_BOOTSTRAP: string;
+    INJECT_DRAIN: string;
+    PAGE_VALUE_SERIALIZE: string;
+  };
+  ({ INJECT_BOOTSTRAP, INJECT_DRAIN, PAGE_VALUE_SERIALIZE } = extract());
 
   expect(INJECT_BOOTSTRAP).toContain("__btmcpBuffer");
   expect(INJECT_DRAIN).toContain("__btmcpBuffer");
+  expect(PAGE_VALUE_SERIALIZE).toContain("serializeBtmcpValue");
 
   fixture = await startFixtureServer();
   browser = await chromium.launch({ headless: true, ...browserSupport.launchOptions });
@@ -195,6 +201,18 @@ describe.skipIf(!browserSupport.usable)("injected console capture", () => {
     await page.goto(fixture.url, { waitUntil: "load" });
     // Drain before bootstrap — must not throw.
     expect(await page.evaluate(INJECT_DRAIN)).toEqual([]);
+    await page.close();
+  });
+});
+
+describe.skipIf(!browserSupport.usable)("page-script value serializer", () => {
+  it("turns a DOM node into a tag preview instead of failing to clone it", async () => {
+    const page = await browser.newPage();
+    await page.goto(fixture.url, { waitUntil: "load" });
+    const preview = await page.evaluate(
+      `(${PAGE_VALUE_SERIALIZE})(document.body)`
+    );
+    expect(preview).toMatchObject({ __type: "element", tagName: "BODY" });
     await page.close();
   });
 });

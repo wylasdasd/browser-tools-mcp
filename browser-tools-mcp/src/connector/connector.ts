@@ -32,6 +32,8 @@ import {
 } from "../util/image.js";
 import { AuditError, runLighthouseAudit, type AuditHooks } from "../lighthouse/runner.js";
 import { isAuditCategory, type AuditCategory, type AuditReport } from "../lighthouse/types.js";
+import { redactValue } from "../util/redact.js";
+import { truncateStringsInData } from "../util/truncate.js";
 
 export const SERVER_SIGNATURE = "mcp-browser-connector-24x7";
 export const SERVER_VERSION = "2.0.0";
@@ -140,6 +142,46 @@ export interface ScreenshotCapture {
   url: string;
 }
 
+export const INTERACT_ACTIONS = ["click", "type", "press", "hover", "scroll"] as const;
+export type InteractAction = (typeof INTERACT_ACTIONS)[number];
+
+export function isInteractAction(value: unknown): value is InteractAction {
+  return typeof value === "string" && (INTERACT_ACTIONS as readonly string[]).includes(value);
+}
+
+export interface PageScriptResult {
+  result: unknown;
+  resultType: string;
+  awaited: boolean;
+  truncated: boolean;
+  tabId: TabId | null;
+  url: string;
+  otherTabs: number;
+}
+
+export interface InteractRequest {
+  action: InteractAction;
+  selector?: string;
+  text?: string;
+  key?: string;
+  x?: number;
+  y?: number;
+  deltaX?: number;
+  deltaY?: number;
+  tabId?: TabId;
+}
+
+export interface InteractResult {
+  action: InteractAction;
+  matched: number;
+  x?: number;
+  y?: number;
+  tagName?: string;
+  tabId: TabId | null;
+  url: string;
+  otherTabs: number;
+}
+
 export interface Connector {
   app: Express;
   server: http.Server;
@@ -163,6 +205,8 @@ export interface Connector {
   captureScreenshot(options?: { name?: string; tabId?: TabId }): Promise<ScreenshotCapture>;
   refreshTab(options?: { tabId?: TabId }): Promise<void>;
   readStorage(kinds: string[], options?: { tabId?: TabId }): Promise<Record<string, unknown>>;
+  runPageScript(script: string, options?: { tabId?: TabId; timeoutMs?: number }): Promise<PageScriptResult>;
+  interactWithPage(request: InteractRequest): Promise<InteractResult>;
   runAudit(
     category: AuditCategory,
     options?: { url?: string; tabId?: TabId }
@@ -441,6 +485,45 @@ export async function createConnector(config: ConnectorConfig = {}): Promise<Con
     try {
       const url = typeof req.body?.url === "string" ? req.body.url : undefined;
       res.json(await runAudit(category, url ? { url } : {}));
+    } catch (error) {
+      respondWithError(res, error);
+    }
+  });
+
+  api.post("/script", async (req: Request, res: Response) => {
+    try {
+      const script = typeof req.body?.script === "string" ? req.body.script : "";
+      res.json(
+        await runPageScript(script, {
+          ...(req.body?.tabId !== undefined ? { tabId: req.body.tabId } : {}),
+          ...(req.body?.timeoutMs !== undefined ? { timeoutMs: req.body.timeoutMs } : {}),
+        })
+      );
+    } catch (error) {
+      respondWithError(res, error);
+    }
+  });
+
+  api.post("/interact", async (req: Request, res: Response) => {
+    try {
+      const action = req.body?.action;
+      if (!isInteractAction(action)) {
+        res.status(400).json({ error: `Unknown action: ${action ?? "(none)"}`, code: "BAD_ACTION" });
+        return;
+      }
+      res.json(
+        await interactWithPage({
+          action,
+          ...(typeof req.body?.selector === "string" ? { selector: req.body.selector } : {}),
+          ...(typeof req.body?.text === "string" ? { text: req.body.text } : {}),
+          ...(typeof req.body?.key === "string" ? { key: req.body.key } : {}),
+          ...(typeof req.body?.x === "number" ? { x: req.body.x } : {}),
+          ...(typeof req.body?.y === "number" ? { y: req.body.y } : {}),
+          ...(typeof req.body?.deltaX === "number" ? { deltaX: req.body.deltaX } : {}),
+          ...(typeof req.body?.deltaY === "number" ? { deltaY: req.body.deltaY } : {}),
+          ...(req.body?.tabId !== undefined ? { tabId: req.body.tabId } : {}),
+        })
+      );
     } catch (error) {
       respondWithError(res, error);
     }
@@ -852,6 +935,8 @@ export async function createConnector(config: ConnectorConfig = {}): Promise<Con
       case "screenshot-result":
       case "refresh-result":
       case "storage-result":
+      case "run-script-result":
+      case "interact-result":
         resolvePending(connection, message);
         break;
       default:
@@ -890,14 +975,15 @@ export async function createConnector(config: ConnectorConfig = {}): Promise<Con
   function requestFromExtension(
     connection: ExtensionConnection,
     type: string,
-    payload: Record<string, unknown> = {}
+    payload: Record<string, unknown> = {},
+    timeoutMs?: number
   ): Promise<Record<string, unknown>> {
     const requestId = crypto.randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(requestId);
         reject(new ExtensionTimeoutError(`The extension did not answer ${type} in time`));
-      }, requestTimeoutMs);
+      }, timeoutMs ?? requestTimeoutMs);
       timer.unref?.();
 
       pending.set(requestId, { resolve, reject, timer, connectionId: connection.id });
@@ -970,6 +1056,90 @@ export async function createConnector(config: ConnectorConfig = {}): Promise<Con
     });
     const storage = response["storage"];
     return storage && typeof storage === "object" ? (storage as Record<string, unknown>) : {};
+  }
+
+  function clampScriptTimeout(ms?: number): number | undefined {
+    if (typeof ms !== "number" || !Number.isFinite(ms)) return undefined;
+    return Math.min(60_000, Math.max(1_000, Math.round(ms)));
+  }
+
+  function sanitizeReturnedValue(value: unknown): { value: unknown; truncated: boolean } {
+    const redacted = redactValue(value, { enabled: config.redact !== false });
+    const limited = truncateStringsInData(redacted, store.settings.stringSizeLimit);
+    return { value: limited, truncated: jsonSize(limited) < jsonSize(redacted) };
+  }
+
+  function jsonSize(value: unknown): number {
+    try {
+      return JSON.stringify(value)?.length ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  async function runPageScript(
+    script: string,
+    options: { tabId?: TabId; timeoutMs?: number } = {}
+  ): Promise<PageScriptResult> {
+    if (typeof script !== "string" || !script.trim()) {
+      throw new ExtensionRequestError("script is required");
+    }
+    if (script.length > 100_000) {
+      throw new ExtensionRequestError("script is too large");
+    }
+    const connection = connectionForTab(options.tabId);
+    const response = await requestFromExtension(
+      connection,
+      "run-script",
+      { script },
+      clampScriptTimeout(options.timeoutMs)
+    );
+    const shaped = sanitizeReturnedValue(response["result"]);
+    const scoped = scope(false, options.tabId);
+    return {
+      result: shaped.value,
+      resultType:
+        typeof response["resultType"] === "string" ? response["resultType"] : typeof response["result"],
+      awaited: response["awaited"] === true,
+      truncated: shaped.truncated,
+      tabId: scoped.tabId,
+      url: scoped.url,
+      otherTabs: scoped.otherTabs,
+    };
+  }
+
+  async function interactWithPage(request: InteractRequest): Promise<InteractResult> {
+    if (!isInteractAction(request.action)) {
+      throw new ExtensionRequestError(`Unknown action: ${String(request.action)}`);
+    }
+    if (request.action === "type" && typeof request.text !== "string") {
+      throw new ExtensionRequestError("type requires text");
+    }
+    if (request.action === "press" && !request.key) {
+      throw new ExtensionRequestError("press requires key");
+    }
+    const connection = connectionForTab(request.tabId);
+    const response = await requestFromExtension(connection, "interact", {
+      action: request.action,
+      ...(request.selector !== undefined ? { selector: request.selector } : {}),
+      ...(request.text !== undefined ? { text: request.text } : {}),
+      ...(request.key !== undefined ? { key: request.key } : {}),
+      ...(request.x !== undefined ? { x: request.x } : {}),
+      ...(request.y !== undefined ? { y: request.y } : {}),
+      ...(request.deltaX !== undefined ? { deltaX: request.deltaX } : {}),
+      ...(request.deltaY !== undefined ? { deltaY: request.deltaY } : {}),
+    });
+    const scoped = scope(false, request.tabId);
+    return {
+      action: request.action,
+      matched: typeof response["matched"] === "number" ? response["matched"] : 0,
+      ...(typeof response["x"] === "number" ? { x: response["x"] } : {}),
+      ...(typeof response["y"] === "number" ? { y: response["y"] } : {}),
+      ...(typeof response["tagName"] === "string" ? { tagName: response["tagName"] } : {}),
+      tabId: scoped.tabId,
+      url: scoped.url,
+      otherTabs: scoped.otherTabs,
+    };
   }
 
   /**
@@ -1073,6 +1243,8 @@ export async function createConnector(config: ConnectorConfig = {}): Promise<Con
     captureScreenshot,
     refreshTab,
     readStorage,
+    runPageScript,
+    interactWithPage,
     runAudit,
     close,
   };

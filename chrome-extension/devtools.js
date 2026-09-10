@@ -161,6 +161,12 @@
       case "get-storage":
         void readStorage(message);
         break;
+      case "run-script":
+        void runPageScript(message);
+        break;
+      case "interact":
+        void interactWithPage(message);
+        break;
       default:
         break;
     }
@@ -656,6 +662,186 @@
     }
   }
 
+  const PAGE_CONTROL_OFF =
+    'Page control is disabled. Enable "Allow page scripts and input" in the BrowserTools panel.';
+  const INTERACT_NEEDS_DEBUGGER =
+    'Interactions require the "debugger" capture mode. Enable it in the BrowserTools panel and reload DevTools.';
+
+  async function runPageScript(message) {
+    if (!settings.allowPageControl) {
+      respond(message.requestId, { type: "run-script-result", ok: false, error: PAGE_CONTROL_OFF });
+      return;
+    }
+    const script = typeof message.script === "string" ? message.script : "";
+    if (!script.trim()) {
+      respond(message.requestId, { type: "run-script-result", ok: false, error: "script is required" });
+      return;
+    }
+    try {
+      const wrapped =
+        "(async function () {\n" +
+        "  var serialize = " +
+        PAGE_VALUE_SERIALIZE +
+        ";\n" +
+        "  var value = await (async function () {\n" +
+        script +
+        "\n  })();\n" +
+        "  return {\n" +
+        "    result: serialize(value),\n" +
+        '    resultType: value === null ? "null" : Array.isArray(value) ? "array" : typeof value,\n' +
+        "    awaited: true\n" +
+        "  };\n" +
+        "})()";
+      // inspectedWindow.eval does not reliably await promises; the debugger
+      // protocol does. Inject mode polls a slot on window instead.
+      const payload = await evaluateExpression(wrapped);
+      respond(message.requestId, {
+        type: "run-script-result",
+        ok: true,
+        result: payload && payload.result,
+        resultType: payload && payload.resultType,
+        awaited: true,
+      });
+    } catch (error) {
+      respond(message.requestId, {
+        type: "run-script-result",
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const KEY_DEFS = {
+    Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
+    Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
+    Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+    Esc: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+    Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
+    Delete: { key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 },
+    ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+    ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
+    ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+    ArrowRight: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
+    Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
+    End: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
+    Space: { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " },
+    " ": { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " },
+  };
+
+  function keyDefinition(key) {
+    if (KEY_DEFS[key]) return KEY_DEFS[key];
+    if (typeof key === "string" && key.length === 1) {
+      const upper = key.toUpperCase();
+      const code = /[a-zA-Z]/.test(key) ? `Key${upper}` : /[0-9]/.test(key) ? `Digit${key}` : key;
+      return { key, code, text: key, windowsVirtualKeyCode: upper.charCodeAt(0) };
+    }
+    return { key: String(key || ""), code: String(key || "") };
+  }
+
+  async function dispatchMouse(type, x, y, extra) {
+    await sendDebuggerCommand("Input.dispatchMouseEvent", {
+      type,
+      x,
+      y,
+      button: extra && extra.button ? extra.button : "none",
+      clickCount: extra && extra.clickCount ? extra.clickCount : 0,
+    });
+  }
+
+  async function clickAt(x, y) {
+    await dispatchMouse("mouseMoved", x, y);
+    await dispatchMouse("mousePressed", x, y, { button: "left", clickCount: 1 });
+    await dispatchMouse("mouseReleased", x, y, { button: "left", clickCount: 1 });
+  }
+
+  async function locateTarget(message) {
+    if (typeof message.x === "number" && typeof message.y === "number" && !message.selector) {
+      return { matched: 1, x: message.x, y: message.y };
+    }
+    const selector = typeof message.selector === "string" ? message.selector : "$0";
+    const located = await evalPromise(`(${PAGE_LOCATE_ELEMENT})(${JSON.stringify(selector)})`);
+    if (!located || !located.matched) {
+      throw new Error(
+        selector === "$0"
+          ? "No element is selected in the Elements panel, and no selector was given."
+          : `No element matched ${selector}`
+      );
+    }
+    return located;
+  }
+
+  async function interactWithPage(message) {
+    if (!settings.allowPageControl) {
+      respond(message.requestId, { type: "interact-result", ok: false, error: PAGE_CONTROL_OFF });
+      return;
+    }
+    if (!debuggerAttached || !api.debugger) {
+      respond(message.requestId, {
+        type: "interact-result",
+        ok: false,
+        error: INTERACT_NEEDS_DEBUGGER,
+      });
+      return;
+    }
+
+    const action = message.action;
+    try {
+      if (action === "press") {
+        const key = typeof message.key === "string" ? message.key : "";
+        if (!key) throw new Error("press requires key");
+        const def = keyDefinition(key);
+        await sendDebuggerCommand("Input.dispatchKeyEvent", { type: "keyDown", ...def });
+        await sendDebuggerCommand("Input.dispatchKeyEvent", { type: "keyUp", ...def });
+        respond(message.requestId, { type: "interact-result", ok: true, matched: 0, action });
+        return;
+      }
+
+      const target = await locateTarget(message);
+      const x = target.x;
+      const y = target.y;
+
+      if (action === "hover") {
+        await dispatchMouse("mouseMoved", x, y);
+      } else if (action === "click") {
+        await clickAt(x, y);
+      } else if (action === "type") {
+        await clickAt(x, y);
+        const text = typeof message.text === "string" ? message.text : "";
+        if (text) await sendDebuggerCommand("Input.insertText", { text });
+      } else if (action === "scroll") {
+        const deltaX = typeof message.deltaX === "number" ? message.deltaX : 0;
+        const deltaY = typeof message.deltaY === "number" ? message.deltaY : 0;
+        if (deltaX || deltaY) {
+          await sendDebuggerCommand("Input.dispatchMouseEvent", {
+            type: "mouseWheel",
+            x,
+            y,
+            deltaX,
+            deltaY,
+          });
+        }
+      } else {
+        throw new Error(`Unknown action: ${action || "(none)"}`);
+      }
+
+      respond(message.requestId, {
+        type: "interact-result",
+        ok: true,
+        action,
+        matched: target.matched,
+        x,
+        y,
+        tagName: target.tagName,
+      });
+    } catch (error) {
+      respond(message.requestId, {
+        type: "interact-result",
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /** Cookies need an optional permission the user grants from the panel. */
   async function readCookies() {
     if (!api.cookies) {
@@ -718,6 +904,54 @@
         else resolve(result);
       });
     });
+  }
+
+  async function evaluateExpression(expression) {
+    if (debuggerAttached && api.debugger) {
+      const result = await sendDebuggerCommand("Runtime.evaluate", {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      if (result && result.exceptionDetails) {
+        const details = result.exceptionDetails;
+        throw new Error(
+          (details.exception && details.exception.description) || details.text || "evaluate failed"
+        );
+      }
+      return result && result.result && "value" in result.result ? result.result.value : undefined;
+    }
+
+    const slot = "__btmcpEval_" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
+    await evalPromise(
+      "(function () {\n" +
+        "  var slot = " +
+        JSON.stringify(slot) +
+        ";\n" +
+        "  window[slot] = { done: false };\n" +
+        "  Promise.resolve()\n" +
+        "    .then(function () { return (" +
+        expression +
+        "); })\n" +
+        "    .then(function (value) { window[slot] = { done: true, value: value }; })\n" +
+        "    .catch(function (error) {\n" +
+        "      window[slot] = { done: true, error: String(error && error.message ? error.message : error) };\n" +
+        "    });\n" +
+        "  return true;\n" +
+        "})()"
+    );
+
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const status = await evalPromise("window[" + JSON.stringify(slot) + "]");
+      if (status && status.done) {
+        await evalPromise("delete window[" + JSON.stringify(slot) + "]");
+        if (status.error) throw new Error(status.error);
+        return status.value;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error("The page script did not finish in time");
   }
 
   // ------------------------------------------------------------------ wiring

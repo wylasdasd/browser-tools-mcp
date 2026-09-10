@@ -22,6 +22,11 @@ const DEFAULT_SETTINGS = {
    * console instead — no banner, and it is the only mode Firefox supports.
    */
   captureMode: "debugger",
+  /**
+   * Off by default: running page scripts or synthesizing input is equivalent
+   * to XSS on the user's logged-in session. Enabled from the panel only.
+   */
+  allowPageControl: false,
 };
 
 /**
@@ -170,6 +175,88 @@ const INJECT_DRAIN = `
     window.__btmcpBuffer = [];
     return out;
   })()
+`;
+
+/*
+ * Helpers evaluated in the inspected page for runPageScript / interactWithPage.
+ *
+ * Kept as source strings (like the inject bootstrap) so tests can run the exact
+ * code that ships, without going through the whole MCP stack.
+ *
+ * Serialization happens here so a DOM node never has to cross the extension
+ * boundary. The final credential scrub and string budget are applied later, in
+ * the connector — cutting to the display limit in the page is what used to
+ * slice a token in half and hide it from the redactor.
+ */
+const PAGE_VALUE_CAP = 50_000;
+
+const PAGE_VALUE_SERIALIZE = `
+(function serializeBtmcpValue(value, seen) {
+  seen = seen || [];
+  if (value === undefined) return { __type: "undefined" };
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "bigint") return { __type: "bigint", value: String(value) };
+  if (typeof value === "symbol") return { __type: "symbol", value: String(value) };
+  if (typeof value === "function") return { __type: "function", name: value.name || "" };
+  if (typeof value === "string") {
+    return value.length > ${PAGE_VALUE_CAP} ? value.slice(0, ${PAGE_VALUE_CAP}) : value;
+  }
+  if (typeof value !== "object") return String(value);
+  for (var i = 0; i < seen.length; i++) if (seen[i] === value) return "[Circular]";
+  if (typeof Element !== "undefined" && value instanceof Element) {
+    return {
+      __type: "element",
+      tagName: value.tagName,
+      id: value.id || undefined,
+      className: typeof value.className === "string" && value.className ? value.className : undefined,
+      textContent: String(value.textContent || "").slice(0, ${PAGE_VALUE_CAP})
+    };
+  }
+  var next = seen.concat([value]);
+  if (Array.isArray(value) || (typeof NodeList !== "undefined" && value instanceof NodeList) ||
+      (typeof HTMLCollection !== "undefined" && value instanceof HTMLCollection)) {
+    var max = 50;
+    var out = [];
+    var len = value.length;
+    for (var j = 0; j < len && j < max; j++) out.push(serializeBtmcpValue(value[j], next));
+    if (len > max) out.push({ __type: "truncated", remaining: len - max });
+    return out;
+  }
+  var obj = {};
+  var keys = Object.keys(value);
+  var keyMax = 50;
+  for (var k = 0; k < keys.length && k < keyMax; k++) {
+    try { obj[keys[k]] = serializeBtmcpValue(value[keys[k]], next); }
+    catch (e) { obj[keys[k]] = { __type: "error", error: String(e && e.message ? e.message : e) }; }
+  }
+  return obj;
+})
+`;
+
+const PAGE_LOCATE_ELEMENT = `
+(function locateBtmcpElement(selector) {
+  var el = null;
+  var matched = 0;
+  if (!selector || selector === "$0") {
+    el = typeof $0 !== "undefined" ? $0 : null;
+    matched = el ? 1 : 0;
+  } else {
+    var nodes = document.querySelectorAll(selector);
+    matched = nodes.length;
+    el = nodes[0] || null;
+  }
+  if (!el || typeof el.getBoundingClientRect !== "function") return { matched: 0 };
+  try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (e) {}
+  var r = el.getBoundingClientRect();
+  return {
+    matched: matched,
+    x: r.x + r.width / 2,
+    y: r.y + r.height / 2,
+    width: r.width,
+    height: r.height,
+    tagName: el.tagName
+  };
+})
 `;
 
 /*

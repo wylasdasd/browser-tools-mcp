@@ -2,6 +2,9 @@ import type {
   Artifact,
   Connector,
   ExportResult,
+  InteractRequest,
+  InteractResult,
+  PageScriptResult,
   TabScopedResult,
   TabView,
 } from "../connector/connector.js";
@@ -69,6 +72,8 @@ export interface ConnectorClient {
   screenshot(options: { name?: string; tabId?: TabId }): Promise<ScreenshotResult>;
   refresh(options?: { tabId?: TabId }): Promise<void>;
   storage(kinds: string[], options?: { tabId?: TabId }): Promise<Record<string, unknown>>;
+  runPageScript(script: string, options?: { tabId?: TabId; timeoutMs?: number }): Promise<PageScriptResult>;
+  interactWithPage(request: InteractRequest): Promise<InteractResult>;
   audit(
     category: AuditCategory,
     options?: { url?: string; tabId?: TabId }
@@ -152,6 +157,17 @@ export class InProcessConnectorClient implements ConnectorClient {
     options: { tabId?: TabId } = {}
   ): Promise<Record<string, unknown>> {
     return this.#connector.readStorage(kinds, options);
+  }
+
+  async runPageScript(
+    script: string,
+    options: { tabId?: TabId; timeoutMs?: number } = {}
+  ): Promise<PageScriptResult> {
+    return this.#connector.runPageScript(script, options);
+  }
+
+  async interactWithPage(request: InteractRequest): Promise<InteractResult> {
+    return this.#connector.interactWithPage(request);
   }
 
   async audit(
@@ -278,6 +294,17 @@ export class HttpConnectorClient implements ConnectorClient {
       body: { kinds, ...options },
     });
     return result.storage;
+  }
+
+  runPageScript(
+    script: string,
+    options: { tabId?: TabId; timeoutMs?: number } = {}
+  ): Promise<PageScriptResult> {
+    return this.#request("/api/script", { method: "POST", body: { script, ...options } });
+  }
+
+  interactWithPage(request: InteractRequest): Promise<InteractResult> {
+    return this.#request("/api/interact", { method: "POST", body: request });
   }
 
   audit(
