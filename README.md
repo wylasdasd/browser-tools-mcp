@@ -1,6 +1,6 @@
 # BrowserTools MCP
 
-让 AI 编程助手真正「看见」浏览器。BrowserTools MCP 会从**你正在用的真实 Chrome 会话**——已经登录、正停留在当前页面的那一个——把控制台输出、网络请求、截图和 Lighthouse 审计流式传给任何兼容 MCP 的客户端：Cursor、Claude Code、Windsurf、Cline、Zed、Gemini CLI 等。
+让 AI 编程助手真正「看见」浏览器。BrowserTools MCP 会从**你正在用的真实 Chrome 会话**——已经登录、正停留在当前页面的那一个——把控制台输出、网络请求、截图和 Lighthouse 审计流式传给任何兼容 MCP 的客户端：Cursor、Claude Code、Windsurf、Cline、Zed、Gemini CLI 等。打开面板开关后，还可以在同一会话里**执行页面脚本**，并用 DevTools 协议**模拟点击、输入、悬停和滚动**。
 
 > **2.0 是一次重写。** 三个进程变成一个，不再有未鉴权的本地服务，凭证在离开浏览器之前就会被擦除，并且有了完整测试套件。如果从 1.x 升级，请先读 [MIGRATION.md](MIGRATION.md)——**务必升级，因为 1.2.x 存在严重漏洞。** 详见 [SECURITY.md](SECURITY.md)。
 
@@ -56,7 +56,7 @@ MCP 客户端（Cursor / Claude Code / …）
 | --- | --- |
 | `browser-tools-mcp/` | 主包。MCP stdio 入口、连接器、Lighthouse、脱敏与截图。 |
 | `browser-tools-server/` | 兼容包装：转调同一连接器二进制。多客户端共享一个浏览器会话时才需要。 |
-| `chrome-extension/` | Manifest V3 DevTools 扩展。采集遥测、截图、读存储，经 WebSocket 交给连接器。 |
+| `chrome-extension/` | Manifest V3 DevTools 扩展。采集遥测、截图、读存储、跑页面脚本、模拟鼠标键盘，经 WebSocket 交给连接器。 |
 
 ### 进程怎么连上浏览器
 
@@ -80,7 +80,7 @@ MCP 层通过 `ConnectorClient` 接口读数据：单进程时是 `InProcessConn
 - **debugger（默认）**：走 Chrome DevTools Protocol，信息更全，但 Chrome 会显示「已开始调试此浏览器」横幅。
 - **inject（包装页面 console）**：无横幅；也是 Firefox 唯一能用的模式。
 
-扩展只在 loopback 上发现连接器（先试配置地址，再扫 `3025–3035`），用约定签名确认对面是自己人，然后用 WebSocket 上报 `console-error` / `network-request`，并响应截图、刷新、读存储等请求。
+扩展只在 loopback 上发现连接器（先试配置地址，再扫 `3025–3035`），用约定签名确认对面是自己人，然后用 WebSocket 上报 `console-error` / `network-request`，并响应截图、刷新、读存储、页面脚本和模拟输入等请求。
 
 ### 数据怎么回到模型
 
@@ -132,6 +132,8 @@ MCP 层通过 `ConnectorClient` 接口读数据：单进程时是 `InProcessConn
 
 在要检查的页面打开 Chrome DevTools（F12）。DevTools 一开就开始采集；**BrowserTools** 面板只用来改设置和看状态。然后让助手做类似「看看控制台有没有错误」或「对这个页面做一次无障碍审计」的事。
 
+要跑脚本或模拟鼠标键盘：在面板勾选 **Allow page scripts and input**（默认关闭）。点击和输入还要求采集模式是 **DevTools protocol**。勾选框在面板最上面，Reconnect 按钮下方；改完源码后需在 `chrome://extensions` 里重新加载扩展，并关开一次 DevTools。
+
 不工作？跑 `npx @agentdeskai/browser-tools-mcp --doctor`，它会准确报告缺了哪一块。
 
 想现场看采集是否生效（适合验证新安装），用 `--verbose` 启动连接器：
@@ -163,8 +165,8 @@ npx @agentdeskai/browser-tools-server --verbose
 | `refreshBrowser` | 刷新被检查的标签页 |
 | `getBrowserStorage` | localStorage、sessionStorage 和 Cookie（值受开关控制） |
 | `wipeLogs` | 清空已采集遥测，方便干净复现 |
-| `runPageScript` | 在当前页面执行一段 JS（默认关闭，需在面板打开「Allow page scripts and input」） |
-| `interactWithPage` | 模拟人工点击、输入、悬停、滚动、按键（需 debugger 采集模式，且同上开关） |
+| `runPageScript` | 在当前页面执行一段 JS（默认关闭，见下方） |
+| `interactWithPage` | 模拟点击、输入、悬停、滚动、按键（默认关闭，见下方） |
 | `runAccessibilityAudit` | Lighthouse 无障碍审计 |
 | `runPerformanceAudit` | Lighthouse 性能审计，含 Core Web Vitals |
 | `runSEOAudit` | Lighthouse SEO 审计 |
@@ -172,7 +174,44 @@ npx @agentdeskai/browser-tools-server --verbose
 
 另外还带三个 prompt——`debuggerMode`、`auditMode`、`nextjsSeoAudit`——给助手一套系统工作流，而不是在每个工具列表里塞一大段静态文字。
 
-所有工具都声明了 MCP 输出 schema，客户端拿到的是结构化数据而不是要再解析的散文；只读工具也做了标注，客户端可以安全地自动批准。
+所有工具都声明了 MCP 输出 schema，客户端拿到的是结构化数据而不是要再解析的散文；只读工具也做了标注，客户端可以安全地自动批准。`runPageScript` 和 `interactWithPage` 标为非只读、可能破坏性的，客户端不应自动批准。
+
+### 页面脚本与模拟操作
+
+这两条默认关闭，避免助手在已登录会话上任意改页面。面板没有单独的「模拟人工」按钮：一个开关同时打开脚本和输入。
+
+1. 打开目标页的 DevTools → **BrowserTools**。
+2. 勾选 **Allow page scripts and input**。
+3. 采集模式保持 **DevTools protocol**（inject 下脚本仍可用，点击/输入会失败并说明原因）。
+4. 让助手调用工具，或在客户端里直接调。
+
+**`runPageScript`**：参数是 async 函数体，在页面上下文里执行，适合读状态、滚页面、查 DOM。返回值必须能 JSON 化；DOM 节点会收成 `{ tagName, id, className, textContent }` 预览。结果会脱敏、截断。
+
+```
+runPageScript({ script: "return { title: document.title, href: location.href }" })
+runPageScript({ script: "window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' }); return { y: window.scrollY }" })
+```
+
+**`interactWithPage`**：走 DevTools 协议合成鼠标和键盘，比页面里的 `element.click()` 更接近真人操作。
+
+| `action` | 需要的参数 | 说明 |
+| --- | --- | --- |
+| `click` | `selector` 或视口 `x`/`y` | 移动、按下、抬起 |
+| `type` | `selector` + `text` | 先点击聚焦，再插入文字 |
+| `press` | `key` | 如 `Enter`、`Tab`、`Escape`、`ArrowDown` |
+| `hover` | `selector` | 只移动指针 |
+| `scroll` | `deltaY`（可加 `selector`） | 滚轮；整页滚动也可用上面的 `runPageScript` |
+
+`selector` 省略时用 Elements 面板当前选中的 `$0`。找不到元素会失败，不会点 `(0,0)`。
+
+```
+interactWithPage({ action: "hover", selector: "input.nav-search-input" })
+interactWithPage({ action: "type", selector: "input.nav-search-input", text: "hello" })
+interactWithPage({ action: "click", selector: "button.submit" })
+interactWithPage({ action: "press", key: "Escape" })
+```
+
+分工：脚本负责读和判断；点、打字、悬停走 `interactWithPage`。这是在**真实已登录页面**上操作，权限等于你亲手操作。不想暴露这两条：`--exclude runPageScript,interactWithPage`。
 
 ### 同时开多个标签页
 
@@ -215,6 +254,7 @@ getNetworkLogs({ urlKeywords: ["/api/"], bodyKeywords: ["quota"], limit: 10 })
 - **凭证在入口处擦除**：`Authorization`、`Cookie` 等头，以及捕获字符串里出现的 JWT、云密钥、厂商 token，都会变成 `[REDACTED]`。
 - **请求/响应头默认关闭**（按方向分别控制），存储值除非明确请求否则不返回。
 - **Cookie 访问是可选权限**，从面板授予，扩展默认并不持有。
+- **页面脚本和模拟输入默认关闭。** 面板勾选 **Allow page scripts and input** 后才会执行；返回值同样脱敏。这等于在已登录会话上操作，比读日志危险得多。
 
 漏洞请按 [SECURITY.md](SECURITY.md) 报告。
 
@@ -242,7 +282,7 @@ getNetworkLogs({ urlKeywords: ["/api/"], bodyKeywords: ["quota"], limit: 10 })
 - 网络采集从打开 DevTools 时开始。此前已经结束的请求不会被记录——要完整页面加载，请刷新。
 - 截图受字节预算限制（`screenshotMaxBytes`，默认 3 MB）。超出时会转成 JPEG，还太大再缩小。高 DPI 上内容很密的视口截图否则可能超过 13 MB，既撑爆模型上下文，也超过较新 MCP stdio 传输的读缓冲。若仍塞不进去，就只写磁盘，工具返回路径而不内联。
 - 控制台采集默认走 DevTools 协议，Chrome 会显示「已开始调试此浏览器」横幅。把面板的采集模式改成 **Wrap page console** 即可避免。
-- `runPageScript` / `interactWithPage` 默认不可用。先在面板勾选 **Allow page scripts and input**；模拟点击和输入还要求采集模式是 DevTools protocol。inject 模式下脚本仍可跑，交互会明确失败。不想暴露这两条工具时用 `--exclude runPageScript,interactWithPage`。
+- `runPageScript` / `interactWithPage` 默认不可用。先在面板勾选 **Allow page scripts and input**；模拟点击和输入还要求采集模式是 DevTools protocol。inject 模式下脚本仍可跑，交互会明确失败。页面若把滚动做在内部容器上，`window.scrollTo` 可能看起来没动，需要对那个容器滚或对它 `click`/`hover`。不想暴露这两条工具时用 `--exclude runPageScript,interactWithPage`。
 - **Firefox 未经验证。** 扩展按跨浏览器写的——有 `browser`/`chrome` 垫片、`browser_specific_settings`，以及不需要 `chrome.debugger` 的采集模式——但从未在 Firefox 里加载过，测试套件也没有覆盖。截图尤其依赖 DevTools 协议，在那里不会工作。在有人真正跑过之前，请把 Firefox 当作不支持；无论成败，欢迎反馈。
 - 审计会另启一个浏览器，最多大约一分钟。任何基于 Chromium 的浏览器都可以——Chrome、Chromium、Brave、Edge、Vivaldi、Opera 或 Arc——`--doctor` 会报告将使用哪一个。用 `CHROME_PATH` 覆盖。Arc 是尽力支持，尚未验证无头模式。
 
